@@ -1,3 +1,18 @@
+node_modules/
+.env
+.env.*
+.venv/
+__pycache__/
+*.pyc
+dist/
+build/
+.DS_Store
+.vercel/
+*.db
+*.sqlite
+tmp/
+.idea/
+.vscode/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
