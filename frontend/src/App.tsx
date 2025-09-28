@@ -8,7 +8,7 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } fro
 
 type Message = { role: 'user' | 'assistant'; content: string }
 
-const API_BASE = (import.meta.env.VITE_REACT_APP_BACKEND_URL || import.meta.env.REACT_APP_BACKEND_URL || '').replace(/\/?$/, '')
+const API_BASE = (import.meta.env.VITE_REACT_APP_BACKEND_URL || '').replace(/\/?$/, '')
 
 export default function App() {
   const [messages, setMessages] = useState<Message[]>([])
