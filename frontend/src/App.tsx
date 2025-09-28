@@ -5,10 +5,11 @@ import UploadFileIcon from '@mui/icons-material/UploadFile'
 import SendIcon from '@mui/icons-material/Send'
 import { DataGrid, GridColDef } from '@mui/x-data-grid'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from 'recharts'
+import { BACKEND_URL } from './config'
 
 type Message = { role: 'user' | 'assistant'; content: string }
 
-const API_BASE = (import.meta.env.VITE_REACT_APP_BACKEND_URL || '').replace(/\/?$/, '')
+const API_BASE = (BACKEND_URL || '').replace(/\/?$/, '')
 
 export default function App() {
   const [messages, setMessages] = useState<Message[]>([])
@@ -60,6 +61,7 @@ export default function App() {
     <Container maxWidth="md" sx={{ py: 3 }}>
       <Stack spacing={2}>
         <Typography variant="h4">AI SQL Analyst</Typography>
+        {console.log('Using backend:', API_BASE)}
         <Paper variant="outlined" sx={{ p: 2, height: 400, overflow: 'auto' }}>
           <Stack spacing={1}>
             {messages.map((m, idx) => (
