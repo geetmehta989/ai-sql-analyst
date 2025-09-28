@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
 import { Box, Button, CircularProgress, Container, IconButton, Paper, Stack, TextField, Typography } from '@mui/material'
 import UploadFileIcon from '@mui/icons-material/UploadFile'
@@ -22,6 +22,12 @@ export default function App() {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
+  useEffect(() => {
+    // Log backend URL for debugging
+    // eslint-disable-next-line no-console
+    console.log('Using backend:', import.meta.env.VITE_REACT_APP_BACKEND_URL)
+  }, [])
+
   const gridColumns: GridColDef[] = useMemo(() => tableColumns.map((c) => ({ field: c, headerName: c, flex: 1 })), [tableColumns])
 
   const onUpload = useCallback(async (file: File) => {
@@ -30,7 +36,10 @@ export default function App() {
     setUploading(true)
     try {
       const res = await axios.post(`${API_BASE}/upload`, form, { headers: { 'Content-Type': 'multipart/form-data' } })
-      setMessages((prev) => [...prev, { role: 'assistant', content: `Loaded tables: ${(res.data.tables || []).join(', ')}` }])
+      const content = res?.data?.tables?.length
+        ? `Loaded tables: ${(res.data.tables || []).join(', ')}`
+        : `Uploaded: ${res?.data?.filename || file.name}`
+      setMessages((prev) => [...prev, { role: 'assistant', content }])
     } catch (e: any) {
       setMessages((prev) => [...prev, { role: 'assistant', content: `Upload failed: ${e?.response?.data?.detail || e.message}` }])
     } finally {
@@ -61,7 +70,6 @@ export default function App() {
     <Container maxWidth="md" sx={{ py: 3 }}>
       <Stack spacing={2}>
         <Typography variant="h4">AI SQL Analyst</Typography>
-        {console.log('Using backend:', API_BASE)}
         <Paper variant="outlined" sx={{ p: 2, height: 400, overflow: 'auto' }}>
           <Stack spacing={1}>
             {messages.map((m, idx) => (
