@@ -1,4 +1,225 @@
 import os
+import io
+import sqlite3
+import logging
+from typing import Any, List, Optional
+
+import pandas as pd
+from fastapi import FastAPI, File, UploadFile, Form
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+try:
+    from openai import OpenAI  # Optional; fallback heuristics if not configured
+except Exception:  # noqa: BLE001
+    OpenAI = None  # type: ignore
+
+
+app = FastAPI(title="AI SQL Analyst Backend")
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+DB_PATH = "/tmp/sales.db"
+LAST_UPLOAD_FILE = "/tmp/last_upload.xlsx"
+
+
+@app.get("/")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+def _get_logger() -> logging.Logger:
+    return logging.getLogger("uvicorn.error")
+
+
+def _ensure_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    return conn
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    cur = conn.cursor()
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+    return cur.fetchone() is not None
+
+
+def _load_excel_to_db(bytes_data: bytes) -> dict[str, Any]:
+    df = pd.read_excel(io.BytesIO(bytes_data))
+    with _ensure_connection() as c:
+        df.to_sql("sales", c, if_exists="replace", index=False)
+        c.commit()
+    return {"table": "sales", "columns": df.columns.tolist(), "rows": len(df)}
+
+
+@app.post("/upload")
+async def upload(file: UploadFile = File(...)) -> dict[str, Any]:
+    contents = await file.read()
+    # Persist uploaded bytes for potential reload
+    with open(LAST_UPLOAD_FILE, "wb") as f:
+        f.write(contents)
+    meta = _load_excel_to_db(contents)
+    _get_logger().info("Uploaded and loaded '%s' with columns: %s", file.filename, meta.get("columns"))
+    return {"filename": file.filename, **meta}
+
+
+class AskRequest(BaseModel):
+    question: str
+
+
+def _detect_numeric(sqlite_decl_type: str) -> bool:
+    t = (sqlite_decl_type or "").upper()
+    return any(k in t for k in ["INT", "REAL", "NUM", "DECIMAL", "DOUBLE", "FLOAT"])
+
+
+def _pick_agg_and_column(conn: sqlite3.Connection, question: str) -> tuple[str, Optional[str], list[str], dict[str, str]]:
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(sales)")
+    cols_info = cur.fetchall()
+    col_names = [c[1] for c in cols_info]
+    types = {c[1]: (c[2] or "").upper() for c in cols_info}
+
+    q = (question or "").lower()
+    agg = "SUM"
+    if any(k in q for k in ["average", "avg", "mean"]):
+        agg = "AVG"
+    elif any(k in q for k in ["count", "how many"]):
+        agg = "COUNT"
+    elif "max" in q:
+        agg = "MAX"
+    elif "min" in q:
+        agg = "MIN"
+
+    if "total" in q and "column" in q:
+        return agg, None, col_names, types
+
+    keywords = ["expense", "expenses", "amount", "revenue", "sale", "sales", "price", "cost", "total"]
+    candidates: list[str] = []
+    for name in col_names:
+        lname = name.lower()
+        if any(k in lname for k in keywords):
+            candidates.append(name)
+    numeric_candidates = [c for c in candidates if _detect_numeric(types.get(c, ""))]
+    target_col = (numeric_candidates or candidates or [col_names[0]])[0] if col_names else None
+    return agg, target_col, col_names, types
+
+
+def _try_llm_sql(question: str, schema_cols: list[str]) -> tuple[str, Optional[str]]:
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    base_url = os.getenv("OPENAI_BASE_URL")
+    model = os.getenv("OPENAI_MODEL", "azure/gpt-5-mini")
+    if not api_key or OpenAI is None:
+        return "", None
+    try:
+        client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
+        prompt = (
+            "You write a single SQLite SELECT query (no comments, no DDL/DML).\n"
+            f"Table: sales. Columns: {', '.join(schema_cols)}\n"
+            f"Question: {question}\n"
+            "Only output SQL."
+        )
+        comp = client.chat.completions.create(model=model, messages=[{"role": "user", "content": prompt}])
+        sql = (comp.choices[0].message.content or "").strip().strip(";")
+        return sql, None
+    except Exception as e:  # noqa: BLE001
+        return "", str(e)
+
+
+def _execute_sql(conn: sqlite3.Connection, sql: str) -> tuple[list[str], list[list[Any]]]:
+    cur = conn.cursor()
+    cur.execute(sql)
+    rows = cur.fetchall()
+    cols = [d[0] for d in cur.description] if cur.description else []
+    return cols, [list(r) for r in rows]
+
+
+@app.post("/ask")
+async def ask(req: AskRequest) -> dict[str, Any]:
+    logger = _get_logger()
+    conn = _ensure_connection()
+    try:
+        if not _table_exists(conn, "sales"):
+            if os.path.exists(LAST_UPLOAD_FILE):
+                with open(LAST_UPLOAD_FILE, "rb") as f:
+                    _load_excel_to_db(f.read())
+                conn = _ensure_connection()
+            if not _table_exists(conn, "sales"):
+                return {"answer": "No data uploaded yet. Please upload an Excel file first.", "sql": "", "columns": [], "rows": []}
+
+        # Schema and target selection
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(sales)")
+        schema_cols = [row[1] for row in cur.fetchall()]
+        agg, target_col, all_cols, types = _pick_agg_and_column(conn, req.question)
+
+        # Special: total columns
+        if target_col is None and "total" in (req.question or "").lower() and "column" in (req.question or "").lower():
+            return {"answer": f"Total columns = {len(all_cols)}", "sql": "", "columns": ["total_columns"], "rows": [[len(all_cols)]]}
+
+        # Try LLM SQL first (optional)
+        sql, llm_err = _try_llm_sql(req.question, schema_cols)
+        if not sql:
+            sql = f"SELECT {agg}({target_col}) AS value FROM sales"
+
+        # Ensure SELECT-only
+        if not sql.lower().startswith("select"):
+            sql = f"SELECT {agg}({target_col}) AS value FROM sales"
+
+        try:
+            cols, rows = _execute_sql(conn, sql)
+            answer = "Here is the result of your query."
+            if len(rows) == 1 and len(cols) == 1:
+                answer = f"{cols[0]} = {rows[0][0]}"
+            elif len(rows) == 0:
+                answer = "No rows returned."
+            return {"answer": answer, "sql": sql, "columns": cols, "rows": rows, **({"error": llm_err} if llm_err else {})}
+        except Exception as exec_err:  # noqa: BLE001
+            # Fallback to pandas computation tolerating dirty data
+            try:
+                df = pd.read_sql_query("SELECT * FROM sales", conn)
+                series = pd.to_numeric(df.get(target_col), errors="coerce")
+                value: Any = None
+                if agg == "SUM":
+                    value = float(series.sum()) if series.notna().any() else None
+                elif agg == "AVG":
+                    value = float(series.mean()) if series.notna().any() else None
+                elif agg == "COUNT":
+                    value = int(series.count())
+                elif agg == "MAX":
+                    value = float(series.max()) if series.notna().any() else None
+                elif agg == "MIN":
+                    value = float(series.min()) if series.notna().any() else None
+                if value is None:
+                    raise ValueError("No numeric data to aggregate")
+                return {"answer": f"{agg}({target_col}) = {value}", "sql": sql, "columns": [f"{agg.lower()}"], "rows": [[value]], **({"error": str(exec_err)} if llm_err or exec_err else {})}
+            except Exception as pandas_err:  # noqa: BLE001
+                err_msg = f"{llm_err + '; ' if llm_err else ''}{str(exec_err)}; pandas fallback failed: {str(pandas_err)}"
+                return {"answer": "Could not process query", "error": err_msg, "sql": sql, "columns": [], "rows": []}
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+@app.post("/ask_with_file")
+async def ask_with_file(question: str = Form(...), file: UploadFile = File(...)) -> dict[str, Any]:
+    try:
+        contents = await file.read()
+        _load_excel_to_db(contents)
+        with open(LAST_UPLOAD_FILE, "wb") as f:
+            f.write(contents)
+    except Exception as e:  # noqa: BLE001
+        return {"answer": "Could not process query", "error": f"Failed to read Excel: {str(e)}", "sql": "", "columns": [], "rows": []}
+    return await ask(AskRequest(question=question))
+
+import os
 import sqlite3
 import io
 import pandas as pd
