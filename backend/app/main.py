@@ -2,7 +2,7 @@ import os
 import sqlite3
 import io
 import pandas as pd
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import OpenAI, APIConnectionError, APIStatusError, RateLimitError
@@ -167,6 +167,25 @@ async def ask(req: AskRequest):
         except Exception:
             pass
         return {"answer": "Could not process query", "error": err, "sql": sql, "columns": [], "rows": []}
+
+
+@app.post("/ask_with_file")
+async def ask_with_file(question: str = Form(...), file: UploadFile = File(...)):
+    # Load provided Excel into persistent DB for this request, then delegate to /ask logic
+    try:
+        contents = await file.read()
+        df = pd.read_excel(io.BytesIO(contents))
+        with sqlite3.connect(DB_PATH, check_same_thread=False) as c:
+            df.to_sql("sales", c, if_exists="replace", index=False)
+            c.commit()
+        # Also update last upload cache for warm instances
+        with open(LAST_UPLOAD_FILE, "wb") as f:
+            f.write(contents)
+    except Exception as e:  # noqa: BLE001
+        return {"answer": "Could not process query", "error": f"Failed to read Excel: {str(e)}", "sql": "", "columns": [], "rows": []}
+
+    # Reuse the JSON /ask flow by constructing an AskRequest-like object
+    return await ask(AskRequest(question=question))
 
 import os
 import logging
