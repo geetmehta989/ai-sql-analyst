@@ -63,6 +63,7 @@ async def upload_file(file: UploadFile = File(...)):
 # Keep existing routers
 from .routers import upload, ask  # noqa: E402
 
-app.include_router(upload.router, prefix="/upload", tags=["upload-full-flow"])
+# Avoid conflicting with the simple /upload endpoint
+app.include_router(upload.router, prefix="/upload-full", tags=["upload-full-flow"])
 app.include_router(ask.router, prefix="/ask", tags=["ask"])
 
