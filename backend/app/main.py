@@ -68,12 +68,12 @@ async def ask(request: Request):
         question = (body or {}).get("question", "")
         logger.info("/ask received question: %s", question)
         # Temporary dummy response for testing
-        response = {"answer": "Test answer", "tables": [], "chart": None}
+        response = {"answer": "Test answer", "tables": [], "chart": None, "sql": ""}
         logger.info("/ask response: %s", response)
         return response
     except Exception as exc:  # noqa: BLE001
         logger.exception("/ask error: %s", exc)
-        return {"error": str(exc)}
+        return {"answer": f"Error: {str(exc)}", "tables": [], "chart": None, "sql": "", "error": str(exc)}
 
 
 # Keep existing routers
