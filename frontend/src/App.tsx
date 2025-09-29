@@ -35,12 +35,14 @@ export default function App() {
     form.append('file', file)
     setUploading(true)
     try {
-      const res = await axios.post(`${API_BASE}/upload`, form, { headers: { 'Content-Type': 'multipart/form-data' } })
+      const res = await axios.post(`${API_BASE}/upload`, form)
       const content = res?.data?.tables?.length
         ? `Loaded tables: ${(res.data.tables || []).join(', ')}`
         : `Uploaded: ${res?.data?.filename || file.name}`
       setMessages((prev) => [...prev, { role: 'assistant', content }])
     } catch (e: any) {
+      // eslint-disable-next-line no-console
+      console.log('Upload error details:', e?.response?.data || e)
       setMessages((prev) => [...prev, { role: 'assistant', content: `Upload failed: ${e?.response?.data?.detail || e.message}` }])
     } finally {
       setUploading(false)
