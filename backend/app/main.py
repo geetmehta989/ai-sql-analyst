@@ -5,7 +5,7 @@ import pandas as pd
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from openai import OpenAI
+from openai import OpenAI, APIConnectionError, APIStatusError, RateLimitError
 
 app = FastAPI()
 
@@ -87,10 +87,32 @@ async def ask(req: AskRequest):
 
     api_key = os.getenv("OPENAI_API_KEY", "")
     base_url = os.getenv("OPENAI_BASE_URL")
+    model = os.getenv("OPENAI_MODEL", "azure/gpt-5-mini")
     try:
+        if not api_key:
+            return {"answer": "Could not process query", "error": "OPENAI_API_KEY is not set", "sql": "", "columns": [], "rows": []}
+
         client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
+
+        # Connectivity test to surface real errors (auth/DNS/forbidden)
+        try:
+            client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "Hello"}],
+                max_tokens=1,
+            )
+        except APIStatusError as e:
+            return {"answer": "Could not process query", "error": f"OpenAI APIStatusError {e.status_code}: {getattr(e, 'response', None)}", "sql": "", "columns": [], "rows": []}
+        except APIConnectionError as e:
+            return {"answer": "Could not process query", "error": f"OpenAI APIConnectionError: {str(e)}", "sql": "", "columns": [], "rows": []}
+        except RateLimitError as e:
+            return {"answer": "Could not process query", "error": f"OpenAI RateLimitError: {str(e)}", "sql": "", "columns": [], "rows": []}
+        except Exception as e:  # noqa: BLE001
+            return {"answer": "Could not process query", "error": f"OpenAI error: {str(e)}", "sql": "", "columns": [], "rows": []}
+
+        # Generate SQL
         completion = client.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL", "azure/gpt-5-mini"),
+            model=model,
             messages=[{"role": "user", "content": prompt}],
         )
         sql = (completion.choices[0].message.content or "").strip().strip(";")
@@ -98,7 +120,7 @@ async def ask(req: AskRequest):
         if not sql.lower().startswith("select"):
             sql = "SELECT * FROM sales LIMIT 20"
     except Exception as e:  # noqa: BLE001
-        return {"answer": "Could not process query", "error": str(e), "sql": "", "columns": [], "rows": []}
+        return {"answer": "Could not process query", "error": f"Client init/generation error: {str(e)}", "sql": "", "columns": [], "rows": []}
 
     # Execute the generated SQL and format the response
     try:
