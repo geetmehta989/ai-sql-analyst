@@ -20,6 +20,8 @@ app.add_middleware(
 
 # In-memory SQLite DB
 conn = sqlite3.connect(":memory:", check_same_thread=False)
+# Track last uploaded file path to reload if needed
+LAST_UPLOAD_PATH: str | None = None
 
 
 @app.get("/")
@@ -32,6 +34,12 @@ async def upload(file: UploadFile = File(...)):
     contents = await file.read()
     df = pd.read_excel(io.BytesIO(contents))
     df.to_sql("sales", conn, if_exists="replace", index=False)
+    # Also persist temp file path for later reloads
+    global LAST_UPLOAD_PATH  # noqa: PLW0603
+    tmp_path = "/tmp/last_upload.xlsx"
+    with open(tmp_path, "wb") as f:
+        f.write(contents)
+    LAST_UPLOAD_PATH = tmp_path
     return {"table": "sales", "columns": df.columns.tolist(), "rows": len(df)}
 
 
@@ -47,6 +55,18 @@ async def ask(req: AskRequest):
     try:
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sales'")
         exists = cursor.fetchone()
+        if not exists:
+            # Try to reload last uploaded file if present
+            global LAST_UPLOAD_PATH  # noqa: PLW0603
+            if LAST_UPLOAD_PATH and os.path.exists(LAST_UPLOAD_PATH):
+                try:
+                    with open(LAST_UPLOAD_PATH, "rb") as f:
+                        df = pd.read_excel(io.BytesIO(f.read()))
+                    df.to_sql("sales", conn, if_exists="replace", index=False)
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sales'")
+                    exists = cursor.fetchone()
+                except Exception as reload_exc:  # noqa: BLE001
+                    return {"answer": "Could not process query", "error": str(reload_exc), "sql": "", "columns": [], "rows": []}
         if not exists:
             return {"answer": "No data uploaded yet. Please upload an Excel file first.", "sql": "", "columns": [], "rows": []}
     except Exception as e:  # noqa: BLE001
