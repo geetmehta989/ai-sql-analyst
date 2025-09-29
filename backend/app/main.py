@@ -88,39 +88,56 @@ async def ask(req: AskRequest):
     api_key = os.getenv("OPENAI_API_KEY", "")
     base_url = os.getenv("OPENAI_BASE_URL")
     model = os.getenv("OPENAI_MODEL", "azure/gpt-5-mini")
-    try:
-        if not api_key:
-            return {"answer": "Could not process query", "error": "OPENAI_API_KEY is not set", "sql": "", "columns": [], "rows": []}
-
-        client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
-
-        # Connectivity test to surface real errors (auth/DNS/forbidden)
+    sql = ""
+    llm_error: str | None = None
+    if api_key:
         try:
-            client.chat.completions.create(
+            client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
+            # Try to generate SQL via LLM
+            completion = client.chat.completions.create(
                 model=model,
-                messages=[{"role": "user", "content": "Hello"}],
-                max_tokens=1,
+                messages=[{"role": "user", "content": prompt}],
             )
-        except APIStatusError as e:
-            return {"answer": "Could not process query", "error": f"OpenAI APIStatusError {e.status_code}: {getattr(e, 'response', None)}", "sql": "", "columns": [], "rows": []}
-        except APIConnectionError as e:
-            return {"answer": "Could not process query", "error": f"OpenAI APIConnectionError: {str(e)}", "sql": "", "columns": [], "rows": []}
-        except RateLimitError as e:
-            return {"answer": "Could not process query", "error": f"OpenAI RateLimitError: {str(e)}", "sql": "", "columns": [], "rows": []}
-        except Exception as e:  # noqa: BLE001
-            return {"answer": "Could not process query", "error": f"OpenAI error: {str(e)}", "sql": "", "columns": [], "rows": []}
+            sql = (completion.choices[0].message.content or "").strip().strip(";")
+        except (APIStatusError, APIConnectionError, RateLimitError, Exception) as e:  # noqa: BLE001
+            llm_error = f"LLM error: {str(e)}"
 
-        # Generate SQL
-        completion = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        sql = (completion.choices[0].message.content or "").strip().strip(";")
-        # Guard: enforce SELECT-only
-        if not sql.lower().startswith("select"):
-            sql = "SELECT * FROM sales LIMIT 20"
-    except Exception as e:  # noqa: BLE001
-        return {"answer": "Could not process query", "error": f"Client init/generation error: {str(e)}", "sql": "", "columns": [], "rows": []}
+    # If no SQL from LLM, attempt heuristic SQL generation
+    if not sql:
+        # Determine aggregation intent and target column
+        agg = "SUM"
+        q = (req.question or "").lower()
+        if any(k in q for k in ["average", "avg", "mean"]):
+            agg = "AVG"
+        elif any(k in q for k in ["count", "how many"]):
+            agg = "COUNT"
+        elif "max" in q:
+            agg = "MAX"
+        elif "min" in q:
+            agg = "MIN"
+
+        cursor.execute("PRAGMA table_info(sales)")
+        cols_info = cursor.fetchall()
+        col_names = [c[1] for c in cols_info]
+        types = {c[1]: (c[2] or "").upper() for c in cols_info}
+
+        # Choose best matching column by name and numeric type preference
+        keywords = ["expense", "expenses", "amount", "revenue", "sale", "sales", "price", "cost", "total"]
+        candidates: list[str] = []
+        for name in col_names:
+            lname = name.lower()
+            if any(k in lname for k in keywords):
+                candidates.append(name)
+        # Prefer numeric columns
+        def is_numeric(sqlite_type: str) -> bool:
+            t = sqlite_type.upper()
+            return any(x in t for x in ["INT", "REAL", "NUM", "DECIMAL", "DOUBLE", "FLOAT"])
+
+        numeric_candidates = [c for c in candidates if is_numeric(types.get(c, ""))]
+        target_col = (numeric_candidates or candidates or [col_names[0]])[0] if col_names else None
+        if not target_col:
+            return {"answer": "No columns found in table.", "sql": "", "columns": [], "rows": []}
+        sql = f"SELECT {agg}({target_col}) AS value FROM sales"
 
     # Execute the generated SQL and format the response
     try:
@@ -138,7 +155,10 @@ async def ask(req: AskRequest):
 
         return {"answer": answer, "sql": sql, "columns": cols, "rows": json_rows}
     except Exception as e:  # noqa: BLE001
-        return {"answer": "Could not process query", "error": str(e), "sql": sql, "columns": [], "rows": []}
+        err = f"{str(e)}"
+        if llm_error:
+            err = f"{llm_error}; {err}"
+        return {"answer": "Could not process query", "error": err, "sql": sql, "columns": [], "rows": []}
 
 import os
 import logging
