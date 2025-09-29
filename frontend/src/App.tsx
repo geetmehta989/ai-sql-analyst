@@ -16,6 +16,7 @@ export default function App() {
   const [question, setQuestion] = useState('')
   const [uploading, setUploading] = useState(false)
   const [asking, setAsking] = useState(false)
+  const [lastFile, setLastFile] = useState<File | null>(null)
   const [tableColumns, setTableColumns] = useState<string[]>([])
   const [tableRows, setTableRows] = useState<any[]>([])
   const [chartSpec, setChartSpec] = useState<{ type: string; xKey?: string; yKeys?: string[] } | null>(null)
@@ -40,6 +41,7 @@ export default function App() {
         ? `Loaded tables: ${(res.data.tables || []).join(', ')}`
         : `Uploaded: ${res?.data?.filename || file.name}`
       setMessages((prev) => [...prev, { role: 'assistant', content }])
+      setLastFile(file)
     } catch (e: any) {
       // eslint-disable-next-line no-console
       console.log('Upload error details:', e?.response?.data || e)
@@ -54,7 +56,15 @@ export default function App() {
     setMessages((prev) => [...prev, { role: 'user', content: question }])
     setAsking(true)
     try {
-      const res = await axios.post(`${API_BASE}/ask`, { question }, { headers: { 'Content-Type': 'application/json' } })
+      let res
+      if (lastFile) {
+        const form = new FormData()
+        form.append('question', question)
+        form.append('file', lastFile)
+        res = await axios.post(`${API_BASE}/ask_with_file`, form)
+      } else {
+        res = await axios.post(`${API_BASE}/ask`, { question }, { headers: { 'Content-Type': 'application/json' } })
+      }
       const data = res.data || {}
 
       let display = `Answer: ${data.answer || 'No answer'}`
@@ -96,7 +106,7 @@ export default function App() {
       setAsking(false)
       setQuestion('')
     }
-  }, [question])
+  }, [question, lastFile])
 
   return (
     <Container maxWidth="md" sx={{ py: 3 }}>
