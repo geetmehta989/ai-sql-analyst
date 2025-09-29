@@ -5,7 +5,7 @@ import pandas as pd
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import openai
+from openai import OpenAI
 
 app = FastAPI()
 
@@ -88,7 +88,7 @@ async def ask(req: AskRequest):
     api_key = os.getenv("OPENAI_API_KEY", "")
     base_url = os.getenv("OPENAI_BASE_URL")
     try:
-        client = openai.OpenAI(api_key=api_key, base_url=base_url) if base_url else openai.OpenAI(api_key=api_key)
+        client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
         completion = client.chat.completions.create(
             model=os.getenv("OPENAI_MODEL", "azure/gpt-5-mini"),
             messages=[{"role": "user", "content": prompt}],
