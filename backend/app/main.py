@@ -1,4 +1,84 @@
 import os
+import sqlite3
+import io
+import pandas as pd
+from fastapi import FastAPI, File, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import openai
+
+app = FastAPI()
+
+# Enable CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# In-memory SQLite DB
+conn = sqlite3.connect(":memory:", check_same_thread=False)
+
+
+@app.get("/")
+def health():
+    return {"status": "ok"}
+
+
+@app.post("/upload")
+async def upload(file: UploadFile = File(...)):
+    contents = await file.read()
+    df = pd.read_excel(io.BytesIO(contents))
+    df.to_sql("sales", conn, if_exists="replace", index=False)
+    return {"table": "sales", "columns": df.columns.tolist(), "rows": len(df)}
+
+
+class AskRequest(BaseModel):
+    question: str
+
+
+@app.post("/ask")
+async def ask(req: AskRequest):
+    cursor = conn.cursor()
+    # Ask GPT to generate SQL
+    prompt = (
+        f"Generate an SQLite SQL query to answer: '{req.question}'. The table is 'sales'."
+    )
+
+    # Use OpenAI with optional base_url for LiteLLM proxy
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    base_url = os.getenv("OPENAI_BASE_URL")
+    try:
+        if base_url:
+            client = openai.OpenAI(api_key=api_key, base_url=base_url)
+        else:
+            client = openai.OpenAI(api_key=api_key)
+        completion = client.chat.completions.create(
+            model=os.getenv("OPENAI_MODEL", "azure/gpt-5-mini"),
+            messages=[{"role": "user", "content": prompt}],
+        )
+        sql = completion.choices[0].message.content.strip()
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e), "sql": ""}
+
+    try:
+        cursor.execute(sql)
+        rows = cursor.fetchall()
+        cols = [desc[0] for desc in cursor.description] if cursor.description else []
+        # Convert sqlite row tuples to lists for JSON
+        json_rows = [list(r) for r in rows]
+        return {
+            "answer": "Here is the result of your query.",
+            "sql": sql,
+            "columns": cols,
+            "rows": json_rows,
+        }
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e), "sql": sql}
+
+import os
 import logging
 import re
 import io
