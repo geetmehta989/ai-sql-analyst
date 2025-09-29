@@ -55,29 +55,24 @@ export default function App() {
     setAsking(true)
     try {
       const res = await axios.post(`${API_BASE}/ask`, JSON.stringify({ question }), { headers: { 'Content-Type': 'application/json' } })
-      if (res.data?.error) {
-        setMessages((prev) => [...prev, { role: 'assistant', content: `Error: ${res.data.error}` }])
-        return
-      }
-      const answer: string = res.data?.answer ?? 'No answer'
-      const sql: string = res.data?.sql ?? 'No SQL generated'
-      const tables = res.data?.tables ?? []
-      const chart = res.data?.chart ?? null
-      setMessages((prev) => [...prev, { role: 'assistant', content: `${answer}\n\nSQL: ${sql}` }])
-      if (tables && tables.length > 0 && tables[0]?.columns && tables[0]?.rows) {
-        const data = tables[0]
-        setTableColumns(data.columns)
-        setTableRows((data.rows || []).map((r: any[], i: number) => Object.fromEntries(data.columns.map((c: string, idx: number) => [c, r[idx]]))))
-      } else if (res.data?.data?.columns) {
-        const data = res.data.data
-        setTableColumns(data.columns)
-        setTableRows((data.rows || []).map((r: any[], i: number) => Object.fromEntries(data.columns.map((c: string, idx: number) => [c, r[idx]]))))
-      }
-      if (chart && chart.type) {
-        setChartSpec(chart)
+      const data = res.data || {}
+
+      let display = `Answer: ${data.answer || 'No answer'}`
+      if (data.sql) display += `\nSQL: ${data.sql}`
+      if (data.error) display += `\nError: ${data.error}`
+      setMessages((prev) => [...prev, { role: 'assistant', content: display }])
+
+      // Case 2: render table if columns and rows exist at top-level
+      if (Array.isArray(data.columns) && Array.isArray(data.rows)) {
+        setTableColumns(data.columns as string[])
+        setTableRows((data.rows as any[]).map((r: any[], i: number) => Object.fromEntries((data.columns as string[]).map((c: string, idx: number) => [c, r[idx]]))))
       } else {
-        setChartSpec(null)
+        // Otherwise skip rendering table
+        setTableColumns([])
+        setTableRows([])
       }
+      // Optional: reset chart unless backend suggests
+      setChartSpec(null)
     } catch (e: any) {
       setMessages((prev) => [...prev, { role: 'assistant', content: `Error: ${e?.response?.data?.detail || e.message}` }])
     } finally {
