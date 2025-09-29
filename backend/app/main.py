@@ -1,9 +1,15 @@
 import os
 import logging
 import re
+import io
 from uuid import uuid4
+from typing import Any, List
+import sqlite3
+
+import pandas as pd
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+import openai
 
 from .db import get_engine
 
@@ -23,6 +29,11 @@ app.add_middleware(
 @app.get("/")
 def health():
     return {"status": "ok"}
+
+
+# Global in-memory SQLite connection for demo
+SQLITE_CONN = sqlite3.connect(":memory:", check_same_thread=False)
+SQLITE_CONN.row_factory = sqlite3.Row
 
 
 @app.post("/upload")
@@ -57,7 +68,24 @@ async def upload_file(file: UploadFile = File(...)):
         logger.exception("Failed saving upload: %s", exc)
         raise HTTPException(status_code=500, detail="Failed to save uploaded file")
 
-    return {"filename": file.filename}
+    # Load into in-memory SQLite as table "sales"
+    try:
+        # Prefer reading from bytes to avoid FS dependency too much
+        excel_bytes = None
+        with open(target_path, "rb") as f:
+            excel_bytes = f.read()
+        df = pd.read_excel(io.BytesIO(excel_bytes))
+        if df.empty:
+            raise ValueError("Uploaded Excel has no rows")
+        # Normalize columns
+        df.columns = [re.sub(r"[^A-Za-z0-9_]+", "_", str(c)).strip("_") or "col" for c in df.columns]
+        df.to_sql("sales", SQLITE_CONN, if_exists="replace", index=False)
+        cols: List[str] = [str(c) for c in df.columns]
+        logger.info("Loaded 'sales' table with columns: %s", cols)
+        return {"filename": file.filename, "table": "sales", "columns": cols}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to load Excel into SQLite: %s", exc)
+        raise HTTPException(status_code=400, detail=f"Failed to parse Excel: {exc}")
 
 
 @app.post("/ask")
@@ -67,13 +95,45 @@ async def ask(request: Request):
         body = await request.json()
         question = (body or {}).get("question", "")
         logger.info("/ask received question: %s", question)
-        # Temporary dummy response for testing
-        response = {"answer": "Test answer", "tables": [], "chart": None, "sql": ""}
-        logger.info("/ask response: %s", response)
-        return response
+        # Build schema context from SQLite
+        cursor = SQLITE_CONN.cursor()
+        cursor.execute("PRAGMA table_info(sales)")
+        cols = [row[1] for row in cursor.fetchall()]
+        if not cols:
+            return {"error": "No 'sales' table loaded yet. Upload an Excel file first.", "answer": "", "sql": "", "columns": [], "data": []}
+
+        schema_text = "Table sales with columns: " + ", ".join(cols)
+
+        # OpenAI client via LiteLLM proxy
+        api_key = os.getenv("OPENAI_API_KEY", "")
+        base_url = os.getenv("OPENAI_BASE_URL", "https://proxyllm.ximplify.id")
+        client = openai.OpenAI(api_key=api_key, base_url=base_url)
+        messages = [
+            {"role": "system", "content": "You generate safe single SELECT SQL queries for SQLite. Only SELECT; no comments; reference only the table 'sales'."},
+            {"role": "user", "content": f"{schema_text}. Question: {question}. Return only SQL."},
+        ]
+        resp = client.chat.completions.create(model="azure/gpt-5-mini", messages=messages)
+        sql_text = resp.choices[0].message.content.strip().strip(";")
+        if not re.match(r"^\s*select\b", sql_text, flags=re.I):
+            sql_text = f"SELECT * FROM sales LIMIT 20"
+
+        # Execute generated SQL
+        try:
+            cur = SQLITE_CONN.cursor()
+            cur.execute(sql_text)
+            rows = cur.fetchall()
+            col_names = [desc[0] for desc in cur.description] if cur.description else []
+            data = [list(r) for r in rows]
+            answer = f"Returned {len(data)} rows."
+            result: dict[str, Any] = {"answer": answer, "sql": sql_text, "columns": col_names, "data": data}
+            logger.info("/ask response: %s", {"sql": sql_text, "rows": len(data)})
+            return result
+        except Exception as exec_exc:  # noqa: BLE001
+            logger.exception("SQL execution failed: %s", exec_exc)
+            return {"error": str(exec_exc), "answer": "", "sql": sql_text, "columns": [], "data": []}
     except Exception as exc:  # noqa: BLE001
         logger.exception("/ask error: %s", exc)
-        return {"answer": f"Error: {str(exc)}", "tables": [], "chart": None, "sql": "", "error": str(exc)}
+        return {"error": str(exc), "answer": "", "sql": "", "columns": [], "data": []}
 
 
 # Keep existing routers
