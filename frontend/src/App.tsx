@@ -54,7 +54,11 @@ export default function App() {
     setMessages((prev) => [...prev, { role: 'user', content: question }])
     setAsking(true)
     try {
-      const res = await axios.post(`${API_BASE}/ask`, { question, top_k: 200 })
+      const res = await axios.post(`${API_BASE}/ask`, JSON.stringify({ question }), { headers: { 'Content-Type': 'application/json' } })
+      if (res.data?.error) {
+        setMessages((prev) => [...prev, { role: 'assistant', content: `Error: ${res.data.error}` }])
+        return
+      }
       const { answer, data, chart, sql } = res.data
       setMessages((prev) => [...prev, { role: 'assistant', content: `${answer}\n\nSQL: ${sql}` }])
       setTableColumns(data.columns)

@@ -2,7 +2,7 @@ import os
 import logging
 import re
 from uuid import uuid4
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from .db import get_engine
@@ -58,6 +58,22 @@ async def upload_file(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail="Failed to save uploaded file")
 
     return {"filename": file.filename}
+
+
+@app.post("/ask")
+async def ask(request: Request):
+    logger = logging.getLogger("uvicorn.error")
+    try:
+        body = await request.json()
+        question = (body or {}).get("question", "")
+        logger.info("/ask received question: %s", question)
+        # Temporary dummy response for testing
+        response = {"answer": "Test answer", "tables": [], "chart": None}
+        logger.info("/ask response: %s", response)
+        return response
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("/ask error: %s", exc)
+        return {"error": str(exc)}
 
 
 # Keep existing routers
