@@ -42,41 +42,61 @@ class AskRequest(BaseModel):
 @app.post("/ask")
 async def ask(req: AskRequest):
     cursor = conn.cursor()
-    # Ask GPT to generate SQL
+
+    # Verify that the 'sales' table exists (requires a prior upload)
+    try:
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sales'")
+        exists = cursor.fetchone()
+        if not exists:
+            return {"answer": "No data uploaded yet. Please upload an Excel file first.", "sql": "", "columns": [], "rows": []}
+    except Exception as e:  # noqa: BLE001
+        return {"answer": "Could not process query", "error": str(e), "sql": "", "columns": [], "rows": []}
+
+    # Build a minimal schema hint for the LLM
+    cursor.execute("PRAGMA table_info(sales)")
+    schema_cols = [row[1] for row in cursor.fetchall()]
+    schema_hint = "Columns: " + ", ".join(schema_cols)
+
+    # Ask the LLM to generate a safe SELECT SQL query
     prompt = (
-        f"Generate an SQLite SQL query to answer: '{req.question}'. The table is 'sales'."
+        "You write a single SQLite SELECT query (no comments, no DDL/DML).\n"
+        "Table: sales. " + schema_hint + "\n"
+        f"Question: {req.question}\n"
+        "Only output SQL."
     )
 
-    # Use OpenAI with optional base_url for LiteLLM proxy
     api_key = os.getenv("OPENAI_API_KEY", "")
     base_url = os.getenv("OPENAI_BASE_URL")
     try:
-        if base_url:
-            client = openai.OpenAI(api_key=api_key, base_url=base_url)
-        else:
-            client = openai.OpenAI(api_key=api_key)
+        client = openai.OpenAI(api_key=api_key, base_url=base_url) if base_url else openai.OpenAI(api_key=api_key)
         completion = client.chat.completions.create(
             model=os.getenv("OPENAI_MODEL", "azure/gpt-5-mini"),
             messages=[{"role": "user", "content": prompt}],
         )
-        sql = completion.choices[0].message.content.strip()
+        sql = (completion.choices[0].message.content or "").strip().strip(";")
+        # Guard: enforce SELECT-only
+        if not sql.lower().startswith("select"):
+            sql = "SELECT * FROM sales LIMIT 20"
     except Exception as e:  # noqa: BLE001
-        return {"error": str(e), "sql": ""}
+        return {"answer": "Could not process query", "error": str(e), "sql": "", "columns": [], "rows": []}
 
+    # Execute the generated SQL and format the response
     try:
         cursor.execute(sql)
         rows = cursor.fetchall()
         cols = [desc[0] for desc in cursor.description] if cursor.description else []
-        # Convert sqlite row tuples to lists for JSON
         json_rows = [list(r) for r in rows]
-        return {
-            "answer": "Here is the result of your query.",
-            "sql": sql,
-            "columns": cols,
-            "rows": json_rows,
-        }
+
+        # Try to craft a concise answer when it looks like a scalar result
+        answer = "Here is the result of your query."
+        if len(json_rows) == 1 and len(cols) == 1:
+            answer = f"{cols[0]} = {json_rows[0][0]}"
+        elif len(json_rows) == 0:
+            answer = "No rows returned."
+
+        return {"answer": answer, "sql": sql, "columns": cols, "rows": json_rows}
     except Exception as e:  # noqa: BLE001
-        return {"error": str(e), "sql": sql}
+        return {"answer": "Could not process query", "error": str(e), "sql": sql, "columns": [], "rows": []}
 
 import os
 import logging
