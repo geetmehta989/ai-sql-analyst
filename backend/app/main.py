@@ -18,10 +18,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory SQLite DB
-conn = sqlite3.connect(":memory:", check_same_thread=False)
-# Track last uploaded file path to reload if needed
-LAST_UPLOAD_PATH: str | None = None
+# File-based SQLite DB under /tmp to survive multiple calls on warm instances
+DB_PATH = "/tmp/sales.db"
+LAST_UPLOAD_FILE = "/tmp/last_upload.xlsx"
 
 
 @app.get("/")
@@ -33,13 +32,13 @@ def health():
 async def upload(file: UploadFile = File(...)):
     contents = await file.read()
     df = pd.read_excel(io.BytesIO(contents))
-    df.to_sql("sales", conn, if_exists="replace", index=False)
-    # Also persist temp file path for later reloads
-    global LAST_UPLOAD_PATH  # noqa: PLW0603
-    tmp_path = "/tmp/last_upload.xlsx"
-    with open(tmp_path, "wb") as f:
+    # Save to DB file
+    with sqlite3.connect(DB_PATH, check_same_thread=False) as c:
+        df.to_sql("sales", c, if_exists="replace", index=False)
+        c.commit()
+    # Save the last uploaded Excel to /tmp for possible reloads on cold start
+    with open(LAST_UPLOAD_FILE, "wb") as f:
         f.write(contents)
-    LAST_UPLOAD_PATH = tmp_path
     return {"table": "sales", "columns": df.columns.tolist(), "rows": len(df)}
 
 
@@ -49,6 +48,7 @@ class AskRequest(BaseModel):
 
 @app.post("/ask")
 async def ask(req: AskRequest):
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
 
     # Verify that the 'sales' table exists (requires a prior upload)
@@ -56,18 +56,20 @@ async def ask(req: AskRequest):
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sales'")
         exists = cursor.fetchone()
         if not exists:
-            # Try to reload last uploaded file if present
-            global LAST_UPLOAD_PATH  # noqa: PLW0603
-            if LAST_UPLOAD_PATH and os.path.exists(LAST_UPLOAD_PATH):
+            # Try to reload last uploaded file if present on this instance
+            if os.path.exists(LAST_UPLOAD_FILE):
                 try:
-                    with open(LAST_UPLOAD_PATH, "rb") as f:
+                    with open(LAST_UPLOAD_FILE, "rb") as f:
                         df = pd.read_excel(io.BytesIO(f.read()))
                     df.to_sql("sales", conn, if_exists="replace", index=False)
+                    conn.commit()
                     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sales'")
                     exists = cursor.fetchone()
                 except Exception as reload_exc:  # noqa: BLE001
+                    conn.close()
                     return {"answer": "Could not process query", "error": str(reload_exc), "sql": "", "columns": [], "rows": []}
         if not exists:
+            conn.close()
             return {"answer": "No data uploaded yet. Please upload an Excel file first.", "sql": "", "columns": [], "rows": []}
     except Exception as e:  # noqa: BLE001
         return {"answer": "Could not process query", "error": str(e), "sql": "", "columns": [], "rows": []}
@@ -153,11 +155,17 @@ async def ask(req: AskRequest):
         elif len(json_rows) == 0:
             answer = "No rows returned."
 
-        return {"answer": answer, "sql": sql, "columns": cols, "rows": json_rows}
+        res = {"answer": answer, "sql": sql, "columns": cols, "rows": json_rows}
+        conn.close()
+        return res
     except Exception as e:  # noqa: BLE001
         err = f"{str(e)}"
         if llm_error:
             err = f"{llm_error}; {err}"
+        try:
+            conn.close()
+        except Exception:
+            pass
         return {"answer": "Could not process query", "error": err, "sql": sql, "columns": [], "rows": []}
 
 import os
