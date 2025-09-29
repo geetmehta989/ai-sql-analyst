@@ -54,7 +54,7 @@ export default function App() {
     setMessages((prev) => [...prev, { role: 'user', content: question }])
     setAsking(true)
     try {
-      const res = await axios.post(`${API_BASE}/ask`, JSON.stringify({ question }), { headers: { 'Content-Type': 'application/json' } })
+      const res = await axios.post(`${API_BASE}/ask`, { question }, { headers: { 'Content-Type': 'application/json' } })
       const data = res.data || {}
 
       let display = `Answer: ${data.answer || 'No answer'}`
@@ -64,10 +64,27 @@ export default function App() {
 
       // Case 2: render table if columns and rows exist at top-level
       if (Array.isArray(data.columns) && Array.isArray(data.rows)) {
-        setTableColumns(data.columns as string[])
-        setTableRows((data.rows as any[]).map((r: any[], i: number) => Object.fromEntries((data.columns as string[]).map((c: string, idx: number) => [c, r[idx]]))))
+        const cols = data.columns as string[]
+        const rows = data.rows as any[]
+        try {
+          const normalized = rows.map((r: any) => {
+            if (Array.isArray(r)) {
+              return Object.fromEntries(cols.map((c: string, idx: number) => [c, r[idx]]))
+            }
+            if (r && typeof r === 'object') {
+              return r
+            }
+            return {}
+          })
+          setTableColumns(cols)
+          setTableRows(normalized)
+        } catch (mapErr) {
+          // eslint-disable-next-line no-console
+          console.log('Normalization error:', mapErr)
+          setTableColumns([])
+          setTableRows([])
+        }
       } else {
-        // Otherwise skip rendering table
         setTableColumns([])
         setTableRows([])
       }
